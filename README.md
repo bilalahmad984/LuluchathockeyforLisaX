@@ -1,0 +1,133 @@
+# LuluChat Hockey (LisaX): CI/CD & Azure Deployment
+
+![GitHub Actions](https://img.shields.io/badge/GitHub_Actions-2088FF?style=flat-square&logo=githubactions&logoColor=white)
+![Azure](https://img.shields.io/badge/Azure_VM_%7C_ACR_%7C_Front_Door-0078D4?style=flat-square&logo=microsoftazure&logoColor=white)
+![Blob Storage](https://img.shields.io/badge/Azure_Blob_Storage-0089D6?style=flat-square&logo=microsoftazure&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-2496ED?style=flat-square&logo=docker&logoColor=white)
+![.NET](https://img.shields.io/badge/.NET-512BD4?style=flat-square&logo=dotnet&logoColor=white)
+![Vue.js](https://img.shields.io/badge/Vue.js-4FC08D?style=flat-square&logo=vuedotjs&logoColor=white)
+![SQL Server](https://img.shields.io/badge/SQL_Server-CC2927?style=flat-square&logo=microsoftsqlserver&logoColor=white)
+![Nginx](https://img.shields.io/badge/Nginx-009639?style=flat-square&logo=nginx&logoColor=white)
+![Cloudflare](https://img.shields.io/badge/Cloudflare_DNS-F38020?style=flat-square&logo=cloudflare&logoColor=white)
+![SendGrid](https://img.shields.io/badge/SendGrid-1A82E2?style=flat-square&logo=twilio&logoColor=white)
+
+The DevOps setup behind **LuluChat Hockey**, the chat platform for hockey clubs on LisaX. It runs as its own deployment, separate from the tennis platform ([luluchat-tennisLisaX](https://github.com/bilalahmad984/luluchat-tennisLisaX)). This repository contains the deployment pipelines and server configuration I designed and run. Application code is not included.
+
+## What this project covers
+
+- **Three environments:** `dev`, `stg` and `prod`, each with its own VM, secrets and container image
+- **Containerized .NET backend:** built in GitHub Actions, pushed to **Azure Container Registry**, and run on an Ubuntu VM behind Nginx
+- **Vue.js frontend built in Docker:** environment variables are injected from GitHub Secrets at build time, the build runs inside a container, and the static output is deployed to Nginx on the same VM
+- **Azure Front Door** in front of the platform, routing traffic to the VM and serving uploaded files from **Azure Blob Storage**
+- **Network isolation:** the VM sits in a public subnet and serves web traffic on HTTPS 443; **Microsoft SQL Server** runs in a private subnet with no internet access
+- **Bulk email** through SendGrid, and **DNS** managed on Cloudflare
+- **Server-side secrets:** the backend `.env` lives only on the VM and is passed to the container with `--env-file`
+
+## Architecture
+
+```mermaid
+flowchart LR
+    Dev[Developer] --> GH[GitHub Repository]
+    GH -->|workflow_dispatch| GHA[GitHub Actions]
+    GHA -->|build & push| ACR[(Azure Container Registry)]
+
+    User[Club members] --> CFD[Cloudflare DNS]
+    CFD --> AFD[Azure Front Door]
+    AFD -->|uploads / media| BLOB[(Azure Blob Storage)]
+
+    subgraph VNET[Azure VNet per environment]
+        subgraph PUB[Public subnet]
+            subgraph VM[Ubuntu VM]
+                NGX[Nginx :443]
+                FE[Vue.js static build]
+                API[.NET API container :8080]
+                NGX --> FE
+                NGX --> API
+            end
+        end
+        subgraph PRIV[Private subnet]
+            SQL[(Microsoft SQL Server :1433)]
+        end
+    end
+
+    AFD -->|HTTPS 443| NGX
+    ACR -->|docker pull| API
+    GHA -->|SSH deploy| VM
+    API -->|1433, private only| SQL
+    API -->|file storage| BLOB
+    API -->|bulk email| SG[SendGrid]
+```
+
+### Network and security
+
+| Component | Placement | Inbound access |
+|---|---|---|
+| Ubuntu VM (Nginx, Vue.js build, .NET container) | Public subnet | Web traffic on HTTPS **443** |
+| Microsoft SQL Server | Private subnet | **1433** only from the app VM |
+| Azure Blob Storage | Azure managed | Served through Azure Front Door |
+
+## Deployment flows
+
+### Backend (.NET API)
+
+1. **Build:** GitHub Actions builds the Docker image from the `NinaChatService` project.
+2. **Push:** the image is pushed to Azure Container Registry as `luluchat-hockey-be-<env>:latest`.
+3. **Deploy:** the pipeline connects to the environment's VM over SSH, logs in to ACR and pulls the new image.
+4. **Replace:** any container already bound to port 8080 is removed, and the new container starts with `--restart always` and the server-side env file.
+5. **Clean up:** dangling images are pruned to save disk space.
+
+### Frontend (Vue.js)
+
+1. **Configure:** a `.env` file is generated from GitHub Secrets for the target environment.
+2. **Build in Docker:** the Vue app is built in a clean container (`--no-cache`), and the `dist` folder is copied out.
+3. **Clean target:** the web root `/var/www/<env>-hockeyApp` on the VM is emptied.
+4. **Deploy:** the new build is copied with `scp`, permissions are fixed, and Nginx is reloaded with no downtime.
+
+## Environments
+
+| Environment | Frontend workflow | Backend workflow | Web root | Image |
+|---|---|---|---|---|
+| Dev | `frontend-dev.yml` | `backend-dev.yml` | `/var/www/dev-hockeyApp` | `luluchat-hockey-be-dev` |
+| Staging | `frontend-stg.yml` | `backend-stg.yml` | `/var/www/stg-hockeyApp` | `luluchat-hockey-be-stg` |
+| Production | `frontend-prod.yml` | `backend-prod.yml` | `/var/www/prod-hockeyApp` | `luluchat-hockey-be-prod` |
+
+All workflows run manually (`workflow_dispatch`), so each release is a deliberate step.
+
+## Repository structure
+
+```
+.
+├── .github/
+│   └── workflows/
+│       ├── frontend-{dev,stg,prod}.yml   # Vue.js build in Docker, deploy to Nginx
+│       └── backend-{dev,stg,prod}.yml    # .NET image to ACR, deploy to the VM
+├── docs/
+│   └── github-secrets.md                 # Secrets each environment needs
+├── nginx/
+│   └── hockey.conf.example                # Serves the SPA and proxies the API
+├── .env.example                          # Backend env file layout on the VM
+└── README.md
+```
+
+## Setup
+
+1. Per environment, create a VNet with a public and a private subnet, an Ubuntu VM in the public subnet (Docker and Nginx installed, HTTPS 443 open), and SQL Server in the private subnet reachable only from the VM.
+2. Create an Azure Container Registry, a Blob Storage account and an Azure Front Door profile with the VM and storage account as origins.
+3. Point the domain at Front Door from Cloudflare DNS.
+4. Place the backend env file on the VM at `/opt/luluchat-hockey-<env>/.<env>-env` (see `.env.example`).
+5. Configure Nginx using `nginx/hockey.conf.example`.
+6. Add the secrets listed in [`docs/github-secrets.md`](docs/github-secrets.md).
+7. Run the frontend or backend workflow for the target environment from the **Actions** tab.
+
+## Planned improvements
+
+- Sign in to Azure with **OIDC** (`azure/login`) and a managed identity instead of ACR username and password
+- Tag images with the **commit SHA** instead of `latest`, so every deploy can be traced and rolled back
+- Combine the per-environment files into one **reusable workflow** with the environment as an input
+- Add a health check after the backend container starts, and fail the pipeline if it is not responding
+- Use GitHub **Environments** with required reviewers for production
+
+## Author
+
+**Bilal Ahmad**: DevOps Team Lead, AWS & Azure
+[LinkedIn](https://www.linkedin.com/in/Bilalahmad786) · [Upwork](https://www.upwork.com/freelancers/~01e0db54858a267270) · [GitHub](https://github.com/bilalahmad984)
