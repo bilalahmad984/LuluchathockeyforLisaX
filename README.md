@@ -13,6 +13,8 @@
 
 The DevOps setup behind **LuluChat Hockey**, the chat platform for hockey clubs on LisaX. It runs as its own deployment, separate from the tennis platform ([luluchat-tennisLisaX](https://github.com/bilalahmad984/luluchat-tennisLisaX)). This repository contains the deployment pipelines and server configuration I designed and run. Application code is not included.
 
+> **Two source repositories.** In the real project, the Vue.js frontend and the .NET backend live in **separate repositories**, each with its own pipelines. The `frontend/` and `backend/` folders here mirror those two repositories, so each folder's `.github/workflows` is exactly what runs in its own repo.
+
 ## What this project covers
 
 - **Three environments:** `dev`, `stg` and `prod`, each with its own VM, secrets and container image
@@ -68,7 +70,7 @@ flowchart LR
 
 ## Deployment flows
 
-### Backend (.NET API)
+### Backend repository (.NET API)
 
 1. **Build:** GitHub Actions builds the Docker image from the `NinaChatService` project.
 2. **Push:** the image is pushed to Azure Container Registry as `luluchat-hockey-be-<env>:latest`.
@@ -76,7 +78,7 @@ flowchart LR
 4. **Replace:** any container already bound to port 8080 is removed, and the new container starts with `--restart always` and the server-side env file.
 5. **Clean up:** dangling images are pruned to save disk space.
 
-### Frontend (Vue.js)
+### Frontend repository (Vue.js)
 
 1. **Configure:** a `.env` file is generated from GitHub Secrets for the target environment.
 2. **Build in Docker:** the Vue app is built in a clean container (`--no-cache`), and the `dist` folder is copied out.
@@ -85,7 +87,7 @@ flowchart LR
 
 ## Environments
 
-| Environment | Frontend workflow | Backend workflow | Web root | Image |
+| Environment | Frontend repo workflow | Backend repo workflow | Web root | Image |
 |---|---|---|---|---|
 | Dev | `frontend-dev.yml` | `backend-dev.yml` | `/var/www/dev-hockeyApp` | `luluchat-hockey-be-dev` |
 | Staging | `frontend-stg.yml` | `backend-stg.yml` | `/var/www/stg-hockeyApp` | `luluchat-hockey-be-stg` |
@@ -97,15 +99,17 @@ All workflows run manually (`workflow_dispatch`), so each release is a deliberat
 
 ```
 .
-├── .github/
-│   └── workflows/
-│       ├── frontend-{dev,stg,prod}.yml   # Vue.js build in Docker, deploy to Nginx
-│       └── backend-{dev,stg,prod}.yml    # .NET image to ACR, deploy to the VM
-├── docs/
-│   └── github-secrets.md                 # Secrets each environment needs
+├── frontend/                             # Mirrors the Vue.js frontend repository
+│   └── .github/workflows/
+│       └── frontend-{dev,stg,prod}.yml   # Build in Docker, deploy static files to Nginx
+├── backend/                              # Mirrors the .NET backend repository
+│   ├── .github/workflows/
+│   │   └── backend-{dev,stg,prod}.yml    # Image to ACR, deploy container to the VM
+│   └── .env.example                      # Backend env file layout on the VM
 ├── nginx/
-│   └── hockey.conf.example                # Serves the SPA and proxies the API
-├── .env.example                          # Backend env file layout on the VM
+│   └── hockey.conf.example                # Serves the SPA and proxies the API (shared VM)
+├── docs/
+│   └── github-secrets.md                 # Secrets for each repository and environment
 └── README.md
 ```
 
@@ -114,10 +118,10 @@ All workflows run manually (`workflow_dispatch`), so each release is a deliberat
 1. Per environment, create a VNet with a public and a private subnet, an Ubuntu VM in the public subnet (Docker and Nginx installed, HTTPS 443 open), and SQL Server in the private subnet reachable only from the VM.
 2. Create an Azure Container Registry, a Blob Storage account and an Azure Front Door profile with the VM and storage account as origins.
 3. Point the domain at Front Door from Cloudflare DNS.
-4. Place the backend env file on the VM at `/opt/luluchat-hockey-<env>/.<env>-env` (see `.env.example`).
+4. Place the backend env file (see `backend/.env.example`) on the VM at `/opt/luluchat-hockey-<env>/.<env>-env`.
 5. Configure Nginx using `nginx/hockey.conf.example`.
-6. Add the secrets listed in [`docs/github-secrets.md`](docs/github-secrets.md).
-7. Run the frontend or backend workflow for the target environment from the **Actions** tab.
+6. Add the secrets listed in [`docs/github-secrets.md`](docs/github-secrets.md) to each repository: frontend secrets to the frontend repo, backend and ACR secrets to the backend repo. The SSH secrets are needed in both.
+7. Copy each folder's `.github/workflows` into its own repository, then run the workflow for the target environment from that repo's **Actions** tab.
 
 ## Planned improvements
 
